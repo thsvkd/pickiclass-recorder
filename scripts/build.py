@@ -30,16 +30,21 @@
 
 from __future__ import annotations
 
+import argparse
 import os
 import platform
 import plistlib
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import flet_template
 import sign
 from _common import REPO_ROOT, check, fail, info, pyproject_data, require_uv, run, sync_version
+
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from pickiclass.velopack_update import REPO_URL
 
@@ -448,7 +453,19 @@ def flet_build_command(target: str, *, template_dir: Path | None) -> list[str]:
     진입점에서 Velopack 훅을 처리하고 첫 창을 앱 크기로 만들기 위해, macOS는 첫 창 크기
     (MainMenu.xib) 때문이다.
     """
-    cmd = ["uv", "run", "--no-sync", "flet", "build", target, "--product", _PRODUCT, "--org", _ORG]
+    cmd = [
+        "uv",
+        "run",
+        "--no-sync",
+        "flet",
+        "build",
+        target,
+        "--yes",
+        "--product",
+        _PRODUCT,
+        "--org",
+        _ORG,
+    ]
     if template_dir is not None:
         cmd += ["--template", str(template_dir)]
     return cmd
@@ -714,6 +731,14 @@ def velopack_pack(
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--skip-flet",
+        action="store_true",
+        help="이미 만든 Flutter Windows Release 폴더를 번들로 쓰고 flet build는 건너뛴다.",
+    )
+    args = parser.parse_args()
+
     require_uv()
     target = current_target()
 
@@ -729,34 +754,62 @@ def main() -> int:
     # flet build의 진행 표시(rich)가 이모지를 stdout에 쓰는데 한국어 Windows 콘솔 기본
     # 코덱(cp949)으로는 인코딩할 수 없어 UnicodeEncodeError로 죽는다. 자식 Python을
     # UTF-8 모드로 강제해 회피한다(다른 OS엔 무해).
-    build_env = {**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
+    build_env = {
+        **os.environ,
+        "PYTHONUTF8": "1",
+        "PYTHONIOENCODING": "utf-8",
+        "CI": "true",
+    }
+    flutter_bin = None
+    for candidate in (
+        Path.home() / "flutter" / "3.44.8" / "bin",
+        Path(os.environ.get("FLUTTER_ROOT", "")) / "bin",
+    ):
+        if (candidate / "flutter.bat").is_file() or (candidate / "flutter").is_file():
+            flutter_bin = candidate
+            break
+    if flutter_bin is None:
+        found = shutil.which("flutter")
+        flutter_bin = Path(found).parent if found else None
+    if flutter_bin is not None:
+        build_env["PATH"] = str(flutter_bin) + os.pathsep + build_env.get("PATH", "")
+        build_env["FLUTTER_ROOT"] = str(flutter_bin.parent)
+        info(f"Flutter PATH: {flutter_bin}")
 
-    if target == "windows":
-        # CRT를 공식 redist에서 가져가게 한다(위 WINDOWS_CRT_DLLS 주석 참고).
-        # SystemRoot는 건드리지 않는다 — Windows API가 실제로 보는 값은 그쪽이다.
-        crt = prepare_windows_crt(
-            REPO_ROOT / "build" / "_crt", redist_crt_dir=find_msvc_redist_crt_dir()
-        )
-        if crt is not None:
-            build_env["WINDIR"] = str(crt)
-            info(f"CRT 스테이징: {crt} (WINDIR 재지정)")
-            # WINDIR은 CMake 구성 시점에만 읽힌다 — 옛 경로로 구성된 캐시가 남아 있으면
-            # 여기서 경로를 바꿔도 무시된다(reset_cmake_cache_if_stale 참고).
-            reset_cmake_cache_if_stale(crt)
-        else:
-            info("경고: MSVC redist를 찾지 못했습니다 — 진짜 WINDIR로 진행합니다(32비트 위험).")
+    crt_dir = find_msvc_redist_crt_dir() if target == "windows" else None
+    if target == "windows" and crt_dir is None:
+        info("경고: MSVC redist를 찾지 못했습니다. 번들 CRT를 나중에 확인합니다.")
 
     info("의존성 동기화 (uv sync)")
     check(["uv", "sync"])
 
-    template_dir = flet_template.prepare(flet_version())
-    info(f"flet build {target}")
-    check(flet_build_command(target, template_dir=template_dir), env=build_env)
-
-    dst = stash_output(target)
+    if args.skip_flet:
+        if target != "windows":
+            fail("--skip-flet은 Windows에서만 지원합니다.")
+        release_dir = (
+            REPO_ROOT / "build" / "flutter" / "build" / "windows" / "x64" / "runner" / "Release"
+        )
+        if not (release_dir / APP_EXE_WINDOWS).is_file():
+            fail(f"{release_dir}에 {APP_EXE_WINDOWS}가 없습니다. 먼저 Flutter 빌드를 하세요.")
+        dst = REPO_ROOT / "dist" / f"pickiclass-recorder-{target}"
+        if dst.exists():
+            shutil.rmtree(dst)
+        shutil.copytree(release_dir, dst)
+        info(f"기존 Flutter Release를 번들로 복사: {dst}")
+    else:
+        template_dir = flet_template.prepare(flet_version())
+        info(f"flet build {target}")
+        check(flet_build_command(target, template_dir=template_dir), env=build_env)
+        dst = stash_output(target)
     verify_artifact(dst, target)
     verify_no_secrets(dst)
     if target == "windows":
+        if crt_dir is not None:
+            for name in WINDOWS_CRT_DLLS:
+                source = crt_dir / name
+                if source.is_file():
+                    shutil.copy2(source, dst / name)
+                    info(f"x64 CRT 복사: {name}")
         verify_vc_runtime_arch(dst)  # 서명·패키징 전에 잡아야 한다.
         # 앱 exe 서명(PDF_SIGN_* 설정 시). 미지정이면 미서명으로 계속한다.
         sign.maybe_sign_bundle(dst)
