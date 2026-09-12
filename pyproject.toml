@@ -1,0 +1,47 @@
+[project]
+name = "pickiclass-recorder"
+version = "0.1.0"
+description = "피키클래스 강의 파일 저장 및 로컬 전사"
+requires-python = ">=3.12,<3.14"
+license = { text = "MIT" }
+authors = [{ name = "thsvkd" }]
+dependencies = [
+  "flet==0.86.5",
+  "requests>=2.32",
+  "beautifulsoup4>=4.12",
+  "python-dotenv>=1.0",
+  "faster-whisper>=1.2",
+  "pyaudiowpatch>=0.2.12.7; sys_platform == 'win32'",
+  "yt-dlp>=2026.7.4",
+  "pywebview>=6.0 ; sys_platform == 'win32'",
+  "velopack>=1.2.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/thsvkd/pickiclass-recorder"
+
+[dependency-groups]
+dev = ["pytest>=9", "ruff>=0.15", "flet-cli==0.86.5"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "UP", "B", "SIM"]
+ignore = ["SIM112"] # 기존 .env의 소문자 키와 Windows ProgramFiles(x86) 지원
+
+[tool.flet]
+org = "com.thsvkd"
+product = "피키클래스 파일 저장 및 전사"
+company = "thsvkd"
+copyright = "Copyright (c) 2026 thsvkd"
+
+[tool.flet.app]
+module = "main"
+exclude = [".env", ".git", ".venv", ".research", ".worktrees", "recordings", "dist", "build", "tests", "docs", "__pycache__", ".omc", ".ruff_cache"]

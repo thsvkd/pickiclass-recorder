@@ -1,0 +1,12 @@
+.env
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+build/
+dist/
+recordings/
+.omc/
+.research/
+.ruff_cache/
+node_modules/
