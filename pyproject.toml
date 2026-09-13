@@ -1,12 +1,13 @@
 [project]
 name = "pickiclass-recorder"
-version = "0.1.0"
+version = "0.1.1"
 description = "피키클래스 강의 파일 저장 및 로컬 전사"
 requires-python = ">=3.12,<3.14"
 license = { text = "MIT" }
 authors = [{ name = "thsvkd" }]
 dependencies = [
   "flet==0.86.5",
+  "certifi>=2024.8.30",
   "requests>=2.32",
   "beautifulsoup4>=4.12",
   "python-dotenv>=1.0",
