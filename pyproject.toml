@@ -46,4 +46,4 @@ copyright = "Copyright (c) 2026 thsvkd"
 
 [tool.flet.app]
 module = "main"
-exclude = [".env", ".git", ".venv", ".research", ".worktrees", "recordings", "dist", "build", "tests", "docs", "__pycache__", ".omc", ".ruff_cache", ".uv-cache", ".claude"]
+exclude = [".env", ".git", ".venv", ".research", ".worktrees", "recordings", "dist", "build", "tests", "docs", "__pycache__", ".omc", ".ruff_cache", ".uv-cache", ".claude", "graft", ".ignore", ".grok", ".mcp.json", "AGENTS.md", "opencode.json"]
