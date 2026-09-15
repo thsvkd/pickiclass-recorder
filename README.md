@@ -6,8 +6,12 @@
 저장·전사를 누르면 앱이 소유한 WebView2 창에서 공식 플레이어를 재생하고,
 선택한 출력 장치의 소리를 WAV로 저장한 뒤 로컬 Whisper로 전사합니다.
 
+암호화 강의 재생에는 공식 Kollus Player V3 에이전트가 필요합니다. 처음 저장할 때 Kollus가 설치·업데이트 창을 띄우면 설치하세요.
+
 원격 제어·화면 녹화 프로그램이 켜져 있으면 Kollus 오류 1002로 재생이 중단됩니다.
-Chrome Remote Desktop Host와 Chrome Remote Desktop 확장 프로그램을 제거한 상태에서 실행하세요.
+실측으로 확인된 감지 대상은 캡처 도구(SnippingTool), Steam, 그리고 Chrome Remote Desktop Host가 설치된 상태의 Chrome입니다.
+Host가 설치돼 있으면 원격 접속 중이 아니어도 Chrome이 켜져 있는 동안 감지되므로, 저장 중에는 Chrome을 완전히 종료하세요.
+감지된 프로그램 이름은 실패 메시지에 함께 표시됩니다(Kollus 로그 `%TEMP%\KollusAgent.log` 기준).
 
 [최신 설치 파일 받기](https://github.com/thsvkd/pickiclass-recorder/releases/latest)
 

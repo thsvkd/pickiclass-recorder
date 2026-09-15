@@ -44,6 +44,25 @@ def test_chrome_remote_desktop_is_flagged_as_capture_program():
     ) == ["Chrome Remote Desktop Host"]
 
 
+def test_kollus_block_reason_reads_recent_cp949_log(tmp_path):
+    from datetime import datetime, timedelta
+
+    from pickiclass.playback import kollus_block_reason
+
+    def line(when, msg):
+        stamp = when.strftime("%Y-%m-%d, %H:%M:%S")
+        return f"{stamp}.225, [1], info  , setCaptueCode code = -1002, msg = {msg}\r\n"
+
+    log = tmp_path / "KollusAgent.log"
+    now = datetime.now()
+    log.write_bytes((line(now - timedelta(hours=1), "스팀 클라이언트(steam.exe)")
+                     + line(now, "Chrome Remote Desktop")).encode("cp949"))
+    assert kollus_block_reason(log) == "Chrome Remote Desktop"
+    log.write_bytes(line(now - timedelta(hours=1), "스팀 클라이언트(steam.exe)").encode("cp949"))
+    assert kollus_block_reason(log) is None
+    assert kollus_block_reason(tmp_path / "missing.log") is None
+
+
 def test_parse_event_ignores_non_json_and_secrets_shape():
     assert parse_event("not json") is None
     assert parse_event('{"status":"play","position":1}') == {"status": "play", "position": 1}

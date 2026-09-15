@@ -65,6 +65,7 @@
             if (!detail || typeof detail !== 'object') return;
             if (detail.code != null) state.error_code = detail.code;
             const message = typeof detail.message === 'string' ? detail.message : '';
+            if (message) state.error_message = message.slice(0, 200);
             if (/1002|-1002|캡처|캡쳐|원격|Remote|녹화/i.test(String(detail.code) + message)) {
               state.error_kind = 'capture_block';
             }

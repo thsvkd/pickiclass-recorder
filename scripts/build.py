@@ -811,6 +811,15 @@ def main() -> int:
                     shutil.copy2(source, dst / name)
                     info(f"x64 CRT 복사: {name}")
         verify_vc_runtime_arch(dst)  # 서명·패키징 전에 잡아야 한다.
+        # 내장 재생 창(pickiclass.browser_host)은 python.exe 자식 프로세스로 뜬다. flet build
+        # 번들에는 pythonXY.dll만 있고 실행 파일이 없어 설치본에서 WinError 2로 실패했다.
+        # python.exe는 같은 폴더의 pythonXY.dll을 불러 쓰는 작은 런처라 빌드 Python 것을 쓴다.
+        python_dll = f"python{sys.version_info.major}{sys.version_info.minor}.dll"
+        python_exe = Path(sys.base_prefix) / "python.exe"
+        if not (dst / python_dll).is_file() or not python_exe.is_file():
+            fail(f"번들 {python_dll} 또는 빌드 Python의 python.exe가 없어 내장 재생 런처를 넣지 못했습니다.")
+        shutil.copy2(python_exe, dst / "python.exe")
+        info(f"내장 재생 런처 복사: {python_exe}")
         # 앱 exe 서명(PDF_SIGN_* 설정 시). 미지정이면 미서명으로 계속한다.
         sign.maybe_sign_bundle(dst)
 

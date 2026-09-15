@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import os
+import re
 import sys
 import threading
 import time
 from collections.abc import Callable
+from datetime import datetime
 from pathlib import Path
 
 from pickiclass.audio_capture import AudioCaptureCancelled, AudioCaptureError, LoopbackRecorder
@@ -15,11 +18,38 @@ from pickiclass.models import Lesson
 
 CAPTURE_BLOCK_MESSAGE = (
     "Kollus가 화면 공유·원격 제어 또는 캡처 프로그램을 감지해 재생을 중단했습니다. "
-    "Chrome Remote Desktop Host 등 해당 프로그램을 종료하거나 제거한 뒤 앱만 다시 실행하세요."
+    "해당 프로그램을 종료한 뒤 다시 시도하세요. Chrome Remote Desktop Host가 설치돼 있으면 "
+    "원격 접속 중이 아니어도 Chrome이 켜져 있는 동안 감지됩니다."
 )
 _CAPTURE_NAME_MARKERS = ("chrome remote desktop", "chromoting")
 _START_TIMEOUT_SEC = 90
 _EARLY_INTERRUPT_SEC = 30
+# Kollus 에이전트는 차단할 때 감지한 프로그램 이름을 사용자 TEMP의 로그에 cp949로 남긴다.
+_KOLLUS_BLOCK_RE = re.compile(
+    rb"^(\d{4}-\d\d-\d\d, \d\d:\d\d:\d\d)[^\n]*setCaptueCode code = -?1002, msg = ([^\r\n]+)",
+    re.M,
+)
+
+
+def kollus_block_reason(log_path: Path | None = None, max_age_sec: float = 120) -> str | None:
+    """Kollus 에이전트 로그에서 최근 캡처 차단 사유(감지된 프로그램)를 읽는다."""
+    if log_path is None:
+        log_path = Path(os.environ.get("TEMP", "")) / "KollusAgent.log"
+    try:
+        tail = log_path.read_bytes()[-64_000:]
+    except OSError:
+        return None
+    for stamp, reason in reversed(_KOLLUS_BLOCK_RE.findall(tail)):
+        logged = datetime.strptime(stamp.decode(), "%Y-%m-%d, %H:%M:%S")
+        if abs((datetime.now() - logged).total_seconds()) <= max_age_sec:
+            return reason.decode("cp949", "replace").strip()
+        return None
+    return None
+
+
+def _capture_block_message() -> str:
+    reason = kollus_block_reason()
+    return f"{CAPTURE_BLOCK_MESSAGE} (Kollus 감지: {reason})" if reason else CAPTURE_BLOCK_MESSAGE
 
 
 def capture_programs_from_names(names: list[str]) -> list[str]:
@@ -97,7 +127,7 @@ class PlaybackMonitor:
             self.duration = float(event["duration"])
         if _is_capture_block(event) or status == "error":
             self.outcome = "failed"
-            self.message = CAPTURE_BLOCK_MESSAGE if _is_capture_block(event) else (
+            self.message = _capture_block_message() if _is_capture_block(event) else (
                 "내장 플레이어에서 재생 오류가 발생했습니다."
             )
             return

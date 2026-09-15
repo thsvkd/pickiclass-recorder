@@ -281,7 +281,8 @@ class LessonSelectScreen:
             if blockers:
                 self.app.show_snack_bar(
                     f"{', '.join(blockers)}가 설치되어 있습니다. "
-                    "Kollus가 재생을 중단할 수 있으니 종료하거나 제거한 뒤 저장하세요."
+                    "원격 접속 중이 아니어도 Chrome이 켜져 있으면 Kollus가 재생을 중단하니 "
+                    "Chrome을 완전히 종료한 뒤 저장하세요."
                 )
             self.app.page.update()
         except Exception as exc:  # noqa: BLE001 - 장치 오류는 시작 전에 안내한다.

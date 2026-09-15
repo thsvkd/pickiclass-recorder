@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
 import threading
 from pathlib import Path
+from urllib.parse import urlparse
 
 from pickiclass.embedded_browser import validate_payload
 
@@ -21,7 +23,7 @@ def _emit(value) -> None:
         return
     allowed = {}
     for key in (
-        "status", "position", "duration", "error_code", "error_kind",
+        "status", "position", "duration", "error_code", "error_kind", "error_message",
         "login_form", "player_frame", "lesson_rows",
     ):
         if key in value:
@@ -45,6 +47,19 @@ def run(payload: dict, smoke_seconds: int = 0) -> None:
     closed = threading.Event()
     window.events.closed += closed.set
 
+    def open_kollus_agent(_sender, args):
+        # Kollus 암호화 재생은 공식 Kollus Player V3 에이전트를 kollus: 링크로 깨운다.
+        # WebView2가 띄우는 "외부 앱 열기" 확인창은 자동 재생 창에서 아무도 누르지 않아
+        # 재생이 영원히 시작되지 않았다. Kollus 출처의 kollus: 링크만 확인 없이 연다.
+        try:
+            origin = urlparse(args.InitiatingOrigin)
+            if (urlparse(args.Uri).scheme == "kollus" and origin.scheme == "https"
+                    and (origin.hostname or "").endswith(".kollus.com")):
+                args.Cancel = True
+                os.startfile(args.Uri)
+        except Exception:  # noqa: BLE001 - 실패하면 기본 확인창이 그대로 뜬다.
+            pass
+
     def loaded():
         nonlocal initialized
         from System import Action
@@ -52,6 +67,7 @@ def run(payload: dict, smoke_seconds: int = 0) -> None:
             initialized = True
 
             def transfer_session():
+                window.native.webview.CoreWebView2.LaunchingExternalUriScheme += open_kollus_agent
                 manager = window.native.webview.CoreWebView2.CookieManager
                 for item in payload.pop("cookies", []):
                     cookie = manager.CreateCookie(

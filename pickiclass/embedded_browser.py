@@ -41,6 +41,10 @@ def launch_browser(client, course_id: str) -> subprocess.Popen:
 def start_browser_process(payload: dict, *, capture_stdout: bool) -> subprocess.Popen:
     validate_payload(payload)
     executable = Path(sys.executable).with_name("python.exe")
+    if not executable.is_file():
+        raise SourceUnavailableError(
+            "내장 재생에 필요한 python.exe가 설치 폴더에 없습니다. 최신 설치 파일로 다시 설치하세요."
+        )
     options = {
         "args": [str(executable), "-m", "pickiclass.browser_host"],
         "cwd": Path(__file__).resolve().parents[1],
