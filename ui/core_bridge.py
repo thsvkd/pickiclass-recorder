@@ -1,6 +1,6 @@
 """코어 패키지(pickiclass)를 안전하게 불러오는 브릿지.
 
-코어 모듈(client.py / ffmpeg_tool.py / recorder.py)이 아직 없어도
+코어 모듈(client.py / recorder.py)이 아직 없어도
 GUI가 임포트 에러 없이 실행되도록, 없는 모듈은 None으로 대체한다.
 models.py는 이미 존재하므로 항상 그대로 가져온다.
 """
@@ -20,19 +20,6 @@ except ImportError:
         """코어 미구현 시 사용하는 자리표시자."""
 
     PickiclassClient = None  # type: ignore[assignment,misc]
-
-try:
-    from pickiclass.ffmpeg_tool import FFmpegNotFound, find_ffmpeg, install_ffmpeg
-
-    HAS_FFMPEG_TOOL = True
-except ImportError:
-    HAS_FFMPEG_TOOL = False
-
-    class FFmpegNotFound(Exception):
-        """코어 미구현 시 사용하는 자리표시자."""
-
-    find_ffmpeg = None  # type: ignore[assignment]
-    install_ffmpeg = None  # type: ignore[assignment]
 
 try:
     from pickiclass.recorder import Recorder
@@ -90,12 +77,10 @@ def get_package_version() -> str:
 
 __all__ = [
     "HAS_CLIENT",
-    "HAS_FFMPEG_TOOL",
     "HAS_RECORDER",
     "HAS_VELOPACK",
     "REPO_URL",
     "Course",
-    "FFmpegNotFound",
     "Lesson",
     "LoginError",
     "PickiclassClient",
@@ -106,9 +91,7 @@ __all__ = [
     "check_update",
     "current_version",
     "download_update",
-    "find_ffmpeg",
     "get_package_version",
-    "install_ffmpeg",
     "is_installed",
     "run_startup_maintenance",
     "target_version",

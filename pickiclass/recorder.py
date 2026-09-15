@@ -2,33 +2,28 @@
 
 from __future__ import annotations
 
-import platform
-import re
 import shutil
-import subprocess
 import threading
+import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from enum import Enum, auto
+from fractions import Fraction
+from itertools import pairwise
 from pathlib import Path
-from queue import Empty, Queue
 from tempfile import TemporaryDirectory
 
+import av
 import requests
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadCancelled, DownloadError
 
 from pickiclass.audio_capture import AudioCaptureCancelled
 from pickiclass.client import PickiclassClient, ProtectedMediaError, SourceUnavailableError
-from pickiclass.ffmpeg_tool import NO_WINDOW
 from pickiclass.models import Course, Lesson, Progress, Summary
 from pickiclass.playback import capture_protected_lesson
 from pickiclass.util import sanitize_filename
 
-_TIME_RE = re.compile(r"time=(\d+):(\d\d):(\d\d(?:\.\d+)?)")
-_MIN_BITRATE = 1_000_000
-_MAX_BITRATE = 12_000_000
-_DEFAULT_BITRATE = 8_000_000
 _MAX_ATTEMPTS = 3  # 최초 시도 1회 + 재시도 2회
 _HTTP_TIMEOUT = (3, 1)
 
@@ -47,8 +42,6 @@ class Recorder:
     def __init__(
         self,
         client: PickiclassClient,
-        ffmpeg: Path,
-        ffprobe: Path,
         output_dir: Path,
         speed: float = 1.5,
         keep_original: bool = False,
@@ -56,14 +49,11 @@ class Recorder:
         capture_device_index: int | None = None,
     ) -> None:
         self.client = client
-        self.ffmpeg = Path(ffmpeg)
-        self.ffprobe = Path(ffprobe)
         self.output_dir = Path(output_dir)
         self.speed = speed
         self.keep_original = keep_original
         self.workers = max(1, workers)
         self.capture_device_index = capture_device_index
-        self._use_videotoolbox = self._check_videotoolbox()
         self._transcriber = None
         self._transcribe_lock = threading.Lock()
         self._capture_lock = threading.Lock()
@@ -302,21 +292,11 @@ class Recorder:
         cancel: threading.Event,
     ) -> None:
         final_part = _part_path(final_path)
-        convert_cmd = [
-            str(self.ffmpeg),
-            "-y",
-            "-v",
-            "error",
-            "-stats",
-            "-i",
-            str(input_source),
-            "-af",
-            self._build_audio_filter(),
-            str(final_part),
-        ]
         on_progress(Progress(lesson, "converting", 0, f"음성 {self.speed}배속 변환 중"))
-        converted_duration = total_sec / self.speed if total_sec is not None else None
-        self._run_ffmpeg(convert_cmd, converted_duration, "converting", lesson, on_progress, cancel)
+        self._transcode(
+            input_source, final_part, total_sec, "converting", lesson, on_progress, cancel,
+            video=False,
+        )
         final_part.replace(final_path)
 
     def _process_youtube(
@@ -450,28 +430,37 @@ class Recorder:
                 "쿠키 인증이 필요한 HLS는 현재 지원하지 않습니다. "
                 "인증값을 다른 미디어 서버에 전달하지 않았습니다."
             )
-        safe_headers = []
+        headers = ""
         for name in ("User-Agent", "Referer"):
             value = prepared.headers.get(name)
             if value and "\r" not in value and "\n" not in value:
-                safe_headers.append(f"{name}: {value}")
-        header_args = ["-headers", "\r\n".join(safe_headers) + "\r\n"] if safe_headers else []
-        cmd = [
-            str(self.ffmpeg),
-            "-y",
-            "-v",
-            "error",
-            "-stats",
-            *header_args,
-            "-i",
-            url,
-            "-c",
-            "copy",
-            "-bsf:a",
-            "aac_adtstoasc",
-            str(destination),
-        ]
-        self._run_ffmpeg(cmd, total_sec, "downloading", lesson, on_progress, cancel)
+                headers += f"{name}: {value}\r\n"
+        if cancel.is_set():
+            raise _Cancelled()
+        report = self._progress_reporter(total_sec, "downloading", lesson, on_progress)
+        with (
+            av.open(url, container_options={"headers": headers} if headers else {}, timeout=30)
+            as inp,
+            av.open(str(destination), "w") as out,
+        ):
+            # 스트림 복사(-c copy). ADTS AAC는 mp4 muxer가 aac_adtstoasc를 자동으로 끼운다.
+            in_streams = [s for s in inp.streams if s.type in ("video", "audio")]
+            copies = {s.index: out.add_stream_from_template(s) for s in in_streams}
+            # ffmpeg CLI처럼 시작 시각을 0으로 당긴다 (HLS/TS는 보통 1.4초 등에서 시작).
+            start = Fraction(inp.start_time or 0, av.time_base)
+            shifts = {s.index: round(start / s.time_base) for s in in_streams}
+            for packet in inp.demux(in_streams):
+                if cancel.is_set():
+                    raise _Cancelled()
+                if packet.dts is None:  # demux 끝의 flush 패킷
+                    continue
+                shift = shifts[packet.stream.index]
+                packet.dts -= shift
+                if packet.pts is not None:
+                    packet.pts -= shift
+                    report(float(packet.pts * packet.time_base))
+                packet.stream = copies[packet.stream.index]
+                out.mux(packet)
 
     def _download_youtube(
         self,
@@ -520,14 +509,10 @@ class Recorder:
             prefix=f".ytdlp_{lesson.lesson_id}_", dir=destination.parent
         ) as temp_dir:
             options = {
-                "format": "bv*+ba/b",
+                # ffmpeg 없이 받으므로 영상+음성이 합쳐진 단일 파일만 고른다.
+                "format": "b[ext=mp4]/b",
                 "format_sort": ["vcodec:h264", "lang", "quality", "res", "fps", "acodec:aac"],
                 "outtmpl": str(Path(temp_dir) / "video.%(ext)s"),
-                "merge_output_format": "mp4",
-                "postprocessors": [
-                    {"key": "FFmpegVideoRemuxer", "preferedformat": "mp4"},
-                ],
-                "ffmpeg_location": str(self.ffmpeg.parent),
                 "progress_hooks": [progress_hook],
                 "postprocessor_hooks": [cancel_if_requested],
                 "match_filter": cancel_if_requested,
@@ -569,42 +554,11 @@ class Recorder:
         on_progress: Callable[[Progress], None],
         cancel: threading.Event,
     ) -> None:
-        video_filter = f"setpts=PTS/{self.speed}"
-        audio_filter = self._build_audio_filter()
         final_part = _part_path(final_path)
-
-        if self._use_videotoolbox:
-            bitrate = (
-                max(_DEFAULT_BITRATE, self._read_bitrate(input_source))
-                if isinstance(input_source, Path)
-                else _DEFAULT_BITRATE
-            )
-            video_codec_args = ["-c:v", "h264_videotoolbox", "-b:v", str(bitrate)]
-        else:
-            video_codec_args = ["-c:v", "libx264", "-crf", "20", "-preset", "veryfast"]
-
-        convert_cmd = [
-            str(self.ffmpeg),
-            "-y",
-            "-v",
-            "error",
-            "-stats",
-            "-i",
-            str(input_source),
-            "-vf",
-            video_filter,
-            "-af",
-            audio_filter,
-            *video_codec_args,
-            "-c:a",
-            "aac",
-            "-b:a",
-            "128k",
-            str(final_part),
-        ]
         on_progress(Progress(lesson=lesson, stage=stage, percent=0.0, message=message))
-        converted_duration = total_sec / self.speed if total_sec is not None else None
-        self._run_ffmpeg(convert_cmd, converted_duration, stage, lesson, on_progress, cancel)
+        self._transcode(
+            input_source, final_part, total_sec, stage, lesson, on_progress, cancel, video=True
+        )
         final_part.replace(final_path)
 
     # -- 경로 계산 -----------------------------------------------------
@@ -633,76 +587,90 @@ class Recorder:
             _part_path(self._raw_path(course, lesson, path)).unlink(missing_ok=True)
         # 완성된 원본은 전사 재시도에 필요하므로 보존한다.
 
-    # -- ffmpeg 실행 -----------------------------------------------------
+    # -- PyAV 실행 -----------------------------------------------------
 
-    def _run_ffmpeg(
+    def _transcode(
         self,
-        cmd: list[str],
+        source: str | Path,
+        destination: Path,
         total_sec: float | None,
         stage: str,
         lesson: Lesson,
         on_progress: Callable[[Progress], None],
         cancel: threading.Event,
+        *,
+        video: bool,
     ) -> None:
+        """PyAV로 배속 변환한다. video면 H.264/AAC, 아니면 음성만 PCM(s16le)으로 쓴다."""
         if cancel.is_set():
             raise _Cancelled()
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True,
-            creationflags=NO_WINDOW,
-        )
-        assert proc.stderr is not None
-        lines: Queue[str | None] = Queue()
+        report = self._progress_reporter(total_sec, stage, lesson, on_progress)
+        with av.open(str(source)) as inp, av.open(str(destination), "w") as out:
+            # 입력 스트림 index -> (출력 스트림, atempo 그래프. 영상은 None)
+            pipes = {}
+            if video and inp.streams.video:
+                in_video = inp.streams.video[0]
+                out_video = out.add_stream("libx264", options={"crf": "20", "preset": "veryfast"})
+                out_video.width, out_video.height = in_video.width, in_video.height
+                out_video.pix_fmt = "yuv420p"
+                out_video.codec_context.time_base = in_video.time_base
+                pipes[in_video.index] = (out_video, None)
+            if inp.streams.audio:
+                in_audio = inp.streams.audio[0]
+                out_audio = out.add_stream(
+                    "aac" if video else "pcm_s16le",
+                    rate=in_audio.rate,
+                    layout=in_audio.layout.name,
+                )
+                if video:
+                    out_audio.bit_rate = 128_000
+                pipes[in_audio.index] = (out_audio, self._atempo_graph(in_audio))
+            if not pipes:
+                raise RuntimeError("변환할 영상·음성 스트림이 없습니다.")
 
-        def read_stderr() -> None:
-            buf = ""
-            try:
-                while True:
-                    ch = proc.stderr.read(1)
-                    if ch == "":
-                        if buf:
-                            lines.put(buf)
-                        return
-                    if ch in ("\r", "\n"):
-                        if buf:
-                            lines.put(buf)
-                        buf = ""
-                    else:
-                        buf += ch
-            finally:
-                lines.put(None)
-
-        reader = threading.Thread(target=read_stderr, daemon=True)
-        reader.start()
-        try:
-            while True:
+            for packet in inp.demux([s for s in inp.streams if s.index in pipes]):
                 if cancel.is_set():
                     raise _Cancelled()
-                try:
-                    line = lines.get(timeout=0.1)
-                except Empty:
-                    continue
-                if line is None:
-                    break
-                self._report_ffmpeg_line(line, total_sec, stage, lesson, on_progress)
-            proc.wait()
-        finally:
-            if proc.poll() is None:
-                proc.terminate()
-                try:
-                    proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                    proc.wait()
-            reader.join(timeout=1)
-            proc.stderr.close()
+                out_stream, graph = pipes[packet.stream.index]
+                for frame in packet.decode():
+                    if frame.time is not None:
+                        report(frame.time)
+                    self._encode(out, out_stream, graph, frame)
+            for out_stream, graph in pipes.values():
+                self._encode(out, out_stream, graph, None)
 
-        if cancel.is_set():
-            raise _Cancelled()
-        if proc.returncode != 0:
-            raise RuntimeError(f"ffmpeg 실행 실패 (종료 코드 {proc.returncode})")
+    def _encode(self, out, stream, graph, frame) -> None:
+        """프레임에 배속을 적용해 인코딩·mux한다. frame이 None이면 남은 데이터를 비운다."""
+        if graph is None:
+            if frame is not None:
+                if frame.pts is None:
+                    return
+                frame.pts = round(frame.pts / self.speed)  # ffmpeg setpts=PTS/speed
+            frames = [frame]
+        else:
+            graph.push(frame)
+            frames = []
+            while True:
+                try:
+                    frames.append(graph.pull())
+                except (av.BlockingIOError, av.EOFError):
+                    break
+            if frame is None:
+                frames.append(None)
+        for item in frames:
+            out.mux(stream.encode(item))
+
+    def _atempo_graph(self, stream) -> av.filter.Graph:
+        graph = av.filter.Graph()
+        chain = [
+            graph.add_abuffer(template=stream),
+            *(graph.add("atempo", str(factor)) for factor in _atempo_factors(self.speed)),
+            graph.add("abuffersink"),
+        ]
+        for src, dst in pairwise(chain):
+            src.link_to(dst)
+        graph.configure()
+        return graph
 
     _STAGE_LABELS = {
         "downloading": "내려받는 중",
@@ -711,102 +679,46 @@ class Recorder:
     }
 
     @classmethod
-    def _report_ffmpeg_line(
+    def _progress_reporter(
         cls,
-        line: str,
         total_sec: float | None,
         stage: str,
         lesson: Lesson,
         on_progress: Callable[[Progress], None],
-    ) -> None:
-        match = _TIME_RE.search(line)
-        if not match:
-            return
-        hours, minutes, seconds = match.groups()
-        elapsed = int(hours) * 3600 + int(minutes) * 60 + float(seconds)
-        if total_sec:
-            percent = max(0.0, min(100.0, elapsed / total_sec * 100))
-            on_progress(Progress(lesson=lesson, stage=stage, percent=percent, message=""))
-        else:
-            # 총 길이를 알 수 없는 경우: 멈춘 것처럼 보이지 않도록 경과 시간을 알려준다.
-            label = cls._STAGE_LABELS.get(stage, stage)
-            message = f"{label} ({_format_elapsed(elapsed)})"
-            on_progress(Progress(lesson=lesson, stage=stage, percent=0.0, message=message))
+    ) -> Callable[[float], None]:
+        """처리한 입력 시각(초)을 받아 0.5초에 한 번씩 진행률을 알린다."""
+        last = 0.0
 
-    def _probe_stream_duration(self, source: str) -> float | None:
+        def report(elapsed: float) -> None:
+            nonlocal last
+            now = time.monotonic()
+            if now - last < 0.5:
+                return
+            last = now
+            if total_sec:
+                percent = max(0.0, min(100.0, elapsed / total_sec * 100))
+                on_progress(Progress(lesson=lesson, stage=stage, percent=percent, message=""))
+            else:
+                # 총 길이를 알 수 없는 경우: 멈춘 것처럼 보이지 않도록 경과 시간을 알려준다.
+                label = cls._STAGE_LABELS.get(stage, stage)
+                message = f"{label} ({_format_elapsed(elapsed)})"
+                on_progress(Progress(lesson=lesson, stage=stage, percent=0.0, message=message))
+
+        return report
+
+    @staticmethod
+    def _probe_stream_duration(source: str) -> float | None:
         try:
-            result = subprocess.run(
-                [
-                    str(self.ffprobe),
-                    "-v",
-                    "error",
-                    "-show_entries",
-                    "format=duration",
-                    "-of",
-                    "default=nw=1:nk=1",
-                    source,
-                ],
-                capture_output=True,
-                text=True,
-                timeout=30,
-                creationflags=NO_WINDOW,
-            )
-            value = result.stdout.strip()
-            return float(value) if value else None
+            with av.open(source) as container:
+                return container.duration / av.time_base if container.duration else None
         except Exception:
             return None
-
-    def _read_bitrate(self, source: str | Path) -> int:
-        for args in (
-            ["-select_streams", "v:0", "-show_entries", "stream=bit_rate"],
-            ["-show_entries", "format=bit_rate"],
-        ):
-            try:
-                result = subprocess.run(
-                    [
-                        str(self.ffprobe),
-                        "-v",
-                        "error",
-                        *args,
-                        "-of",
-                        "default=nw=1:nk=1",
-                        str(source),
-                    ],
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                    creationflags=NO_WINDOW,
-                )
-                value = result.stdout.strip()
-                if value.isdigit():
-                    return max(_MIN_BITRATE, min(_MAX_BITRATE, int(value)))
-            except Exception:
-                continue
-        return _DEFAULT_BITRATE
-
-    def _check_videotoolbox(self) -> bool:
-        if platform.system() != "Darwin":
-            return False
-        try:
-            result = subprocess.run(
-                [str(self.ffmpeg), "-hide_banner", "-encoders"],
-                capture_output=True,
-                text=True,
-                timeout=15,
-            )
-            return "h264_videotoolbox" in result.stdout
-        except Exception:
-            return False
-
-    def _build_audio_filter(self) -> str:
-        factors = _atempo_factors(self.speed)
-        return ",".join(f"atempo={factor}" for factor in factors)
 
 
 def _part_path(path: Path) -> Path:
     """중단된 파일이 완성본으로 오인되지 않도록 확장자 앞에 .part를 끼워넣는다.
 
-    (예: foo.mp4 -> foo.part.mp4. ffmpeg가 출력 포맷을 확장자로 추론하므로
+    (예: foo.mp4 -> foo.part.mp4. PyAV가 출력 포맷을 확장자로 추론하므로
     foo.mp4.part처럼 끝에 붙이면 muxer를 찾지 못해 실패한다.)
     """
     return path.with_name(f"{path.stem}.part{path.suffix}")

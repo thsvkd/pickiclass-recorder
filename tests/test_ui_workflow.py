@@ -7,14 +7,12 @@ from ui.app import App
 from ui.transcription_view import TranscriptionScreen
 
 
-def test_login_starts_without_ffmpeg_or_updater():
+def test_login_starts_without_updater():
     app = App.__new__(App)
     app.client = object()
     app.show_login = AsyncMock()
-    app._check_ffmpeg = AsyncMock()
     asyncio.run(app.start())
     app.show_login.assert_awaited_once()
-    app._check_ffmpeg.assert_not_awaited()
 
 
 def test_remember_stores_id_only_and_removes_old_password():

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import sys
 from pathlib import Path
 
 import flet as ft
@@ -16,18 +15,10 @@ from ui.core_bridge import (
     Lesson,
     PickiclassClient,
     Recorder,
-    find_ffmpeg,
     get_package_version,
-    install_ffmpeg,
 )
 from ui.courses_view import build_course_list_view, build_error_view, build_loading_view
-from ui.demo_data import (
-    DemoClient,
-    DemoRecorder,
-    demo_current_version,
-    demo_find_ffmpeg,
-    demo_install_ffmpeg,
-)
+from ui.demo_data import DemoClient, DemoRecorder, demo_current_version
 from ui.lesson_select_view import LessonSelectScreen
 from ui.login_view import build_login_view
 from ui.progress_view import ProgressScreen
@@ -54,9 +45,6 @@ class App:
         self.keep_original: bool = False
         self.workers: int = 2
         self.capture_device_index: int | None = None
-
-        self.ffmpeg: Path | None = None
-        self.ffprobe: Path | None = None
 
         # 진행 중인 강의 다운로드가 있는지 추적 (업데이트 재시작 권유 여부 판단용).
         self._current_progress_screen: ProgressScreen | None = None
@@ -119,7 +107,7 @@ class App:
         return get_package_version()
 
     # ------------------------------------------------------------------
-    # 시작 흐름: 로그인 (FFmpeg는 다운로드할 때 확인)
+    # 시작 흐름: 로그인
     # ------------------------------------------------------------------
     async def start(self) -> None:
         if self.client is None and not self.demo:
@@ -133,86 +121,6 @@ class App:
             return
 
         await self.show_login()
-
-    async def _check_ffmpeg(self) -> None:
-        find_fn = demo_find_ffmpeg if self.demo else find_ffmpeg
-        if find_fn is None:
-            return
-
-        loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(None, find_fn)
-        if result:
-            self.ffmpeg, self.ffprobe = result
-            return
-
-        proceed = await self._ask_install_ffmpeg()
-        if not proceed:
-            return
-        await self._run_install_ffmpeg()
-
-    async def _ask_install_ffmpeg(self) -> bool:
-        loop = asyncio.get_running_loop()
-        future: asyncio.Future[bool] = loop.create_future()
-
-        def on_yes(e: ft.ControlEvent) -> None:
-            self.page.pop_dialog()
-            if not future.done():
-                future.set_result(True)
-
-        def on_no(e: ft.ControlEvent) -> None:
-            self.page.pop_dialog()
-            if not future.done():
-                future.set_result(False)
-
-        dialog = ft.AlertDialog(
-            modal=True,
-            title=ft.Text("ffmpeg 설치 필요"),
-            content=ft.Text(
-                "영상 처리에 필요한 ffmpeg가 없습니다. 지금 자동으로 설치할까요? "
-                # Windows(gyan.dev)와 macOS(evermeet.cx)는 받는 파일 크기가 꽤 다르다.
-                f"({'약 110MB' if sys.platform.startswith('win') else '약 80MB'})"
-            ),
-            actions=[
-                ft.TextButton("아니요", on_click=on_no),
-                ft.ElevatedButton("예, 설치", on_click=on_yes),
-            ],
-        )
-        self.page.show_dialog(dialog)
-        return await future
-
-    async def _run_install_ffmpeg(self) -> None:
-        status_text = ft.Text("설치 준비 중...")
-        progress_bar = ft.ProgressBar(value=0, width=320)
-        dialog = ft.AlertDialog(
-            modal=True,
-            title=ft.Text("ffmpeg 설치 중"),
-            content=ft.Column([status_text, progress_bar], tight=True, spacing=12),
-        )
-        self.page.show_dialog(dialog)
-
-        def on_progress(fraction: float) -> None:
-            # install_ffmpeg 의 콜백은 별도 스레드에서 호출되므로 run_thread 로 안전하게 넘긴다.
-            self.page.run_thread(self._apply_install_progress, progress_bar, status_text, fraction)
-
-        install_fn = demo_install_ffmpeg if self.demo else install_ffmpeg
-        if install_fn is None:
-            self.page.pop_dialog()
-            return
-
-        loop = asyncio.get_running_loop()
-        try:
-            self.ffmpeg, self.ffprobe = await loop.run_in_executor(None, install_fn, on_progress)
-        except Exception as ex:  # noqa: BLE001
-            status_text.value = f"설치에 실패했습니다: {ex}"
-            self.page.update()
-            await asyncio.sleep(2)
-            self.ffmpeg = self.ffprobe = None
-        self.page.pop_dialog()
-
-    def _apply_install_progress(self, bar: ft.ProgressBar, text: ft.Text, fraction: float) -> None:
-        bar.value = fraction
-        text.value = f"설치 중... {int(fraction * 100)}%"
-        self.page.update(bar, text)
 
     # ------------------------------------------------------------------
     # 로그인
@@ -321,11 +229,6 @@ class App:
     async def _prepare_download(
         self, course: Course, lessons: list[Lesson], previous_view: ft.Control | None = None
     ) -> None:
-        if self.ffmpeg is None or self.ffprobe is None:
-            await self._check_ffmpeg()
-        if self.ffmpeg is None or self.ffprobe is None:
-            self.show_snack_bar("영상 저장에는 FFmpeg가 필요합니다.")
-            return
         try:
             self.output_dir.mkdir(parents=True, exist_ok=True)
         except OSError as ex:
@@ -335,19 +238,15 @@ class App:
         if self.demo:
             recorder = DemoRecorder(
                 self.client,
-                self.ffmpeg,
-                self.ffprobe,
                 self.output_dir,
                 speed=self.speed,
                 keep_original=self.keep_original,
                 workers=self.workers,
                 capture_device_index=self.capture_device_index,
             )
-        elif HAS_RECORDER and self.ffmpeg is not None and self.ffprobe is not None:
+        elif HAS_RECORDER:
             recorder = Recorder(
                 self.client,
-                self.ffmpeg,
-                self.ffprobe,
                 self.output_dir,
                 speed=self.speed,
                 keep_original=self.keep_original,

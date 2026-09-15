@@ -1,4 +1,5 @@
 import threading
+import wave
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -7,7 +8,7 @@ import requests
 
 from pickiclass.client import ProtectedMediaError
 from pickiclass.models import Course, Lesson, VideoSource
-from pickiclass.recorder import Recorder
+from pickiclass.recorder import Recorder, _Cancelled
 
 
 def lesson():
@@ -18,7 +19,7 @@ def test_mp4_only_saved_then_transcribed_from_original(tmp_path, monkeypatch):
     client = SimpleNamespace(
         get_video_source=lambda *a: VideoSource("id", "https://a.test/a.mp4", None)
     )
-    recorder = Recorder(client, Path("ffmpeg"), Path("ffprobe"), tmp_path)
+    recorder = Recorder(client, tmp_path)
     inputs = []
     monkeypatch.setattr(
         recorder, "_download_mp4", lambda url, path, *a: path.write_bytes(b"original") or True
@@ -51,8 +52,6 @@ def test_drm_records_then_transcribes_when_device_selected(tmp_path, monkeypatch
     monkeypatch.setattr("pickiclass.recorder.capture_protected_lesson", capture)
     recorder = Recorder(
         SimpleNamespace(get_video_source=lambda *a: (_ for _ in ()).throw(ProtectedMediaError("암호화"))),
-        Path("ffmpeg"),
-        Path("ffprobe"),
         tmp_path,
         speed=1.0,
         capture_device_index=77,
@@ -80,7 +79,7 @@ def test_drm_is_not_retried_as_a_transient_download_error(tmp_path):
         raise ProtectedMediaError("암호화")
 
     recorder = Recorder(
-        SimpleNamespace(get_video_source=source), Path("ffmpeg"), Path("ffprobe"), tmp_path
+        SimpleNamespace(get_video_source=source), tmp_path
     )
     summary = recorder.run(
         Course("34:1", "강의", ""), [lesson()], lambda p: None, threading.Event()
@@ -90,13 +89,13 @@ def test_drm_is_not_retried_as_a_transient_download_error(tmp_path):
 
 
 def test_raw_path_is_windows_safe(tmp_path):
-    r = Recorder(SimpleNamespace(), Path("ffmpeg"), Path("ffprobe"), tmp_path)
+    r = Recorder(SimpleNamespace(), tmp_path)
     path = r._raw_path(Course("34:1", "강의", ""), lesson(), tmp_path / "01.mp4")
     assert ":" not in path.name
 
 
 def staged_recorder(tmp_path):
-    recorder = Recorder(SimpleNamespace(), Path("ffmpeg"), Path("ffprobe"), tmp_path)
+    recorder = Recorder(SimpleNamespace(), tmp_path)
     course = Course("34:1", "강의", "")
     final = recorder._final_path(course, lesson())
     final.parent.mkdir(parents=True)
@@ -187,7 +186,7 @@ def test_hls_does_not_forward_authenticated_cookies(tmp_path):
 
     session = requests.Session()
     session.cookies.set("session", "private", domain="media.example", path="/")
-    recorder = Recorder(SimpleNamespace(session=session), Path("ffmpeg"), Path("ffprobe"), tmp_path)
+    recorder = Recorder(SimpleNamespace(session=session), tmp_path)
     with pytest.raises(SourceUnavailableError, match="쿠키 인증"):
         recorder._download_hls("https://media.example/video.m3u8", tmp_path / "x.mp4", 10,
                                lesson(), lambda p: None, threading.Event())
@@ -197,10 +196,35 @@ def test_hls_only_passes_safe_headers_not_unrelated_cookies(tmp_path, monkeypatc
     session = requests.Session()
     session.cookies.set("session", "private", domain="pickiclass.com", path="/")
     session.headers["Referer"] = "https://pickiclass.com/"
-    recorder = Recorder(SimpleNamespace(session=session), Path("ffmpeg"), Path("ffprobe"), tmp_path)
+    recorder = Recorder(SimpleNamespace(session=session), tmp_path)
     calls = []
-    monkeypatch.setattr(recorder, "_run_ffmpeg", lambda cmd, *args: calls.append(cmd))
-    recorder._download_hls("https://media.example/video.m3u8", tmp_path / "x.mp4", 10,
-                           lesson(), lambda p: None, threading.Event())
+
+    def fake_open(url, *args, **kwargs):
+        calls.append(kwargs)
+        raise RuntimeError("stop")
+
+    monkeypatch.setattr("pickiclass.recorder.av.open", fake_open)
+    with pytest.raises(RuntimeError, match="stop"):
+        recorder._download_hls("https://media.example/video.m3u8", tmp_path / "x.mp4", 10,
+                               lesson(), lambda p: None, threading.Event())
     assert "private" not in str(calls)
     assert "Referer: https://pickiclass.com/" in str(calls)
+
+
+def test_pyav_audio_speed_conversion_and_cancel(tmp_path):
+    source = tmp_path / "in.wav"
+    with wave.open(str(source), "wb") as output:
+        output.setnchannels(1)
+        output.setsampwidth(2)
+        output.setframerate(16000)
+        output.writeframes(bytes(2 * 16000 * 2))  # 2초 무음
+    recorder = Recorder(SimpleNamespace(), tmp_path, speed=2.0)
+    converted = tmp_path / "out.wav"
+    recorder._convert_audio(source, converted, 2.0, lesson(), lambda p: None, threading.Event())
+    assert Recorder._probe_stream_duration(str(converted)) == pytest.approx(1.0, abs=0.05)
+
+    cancel = threading.Event()
+    # 첫 진행률 보고(변환 도중)에서 취소한다.
+    on_progress = lambda p: None if p.message else cancel.set()  # noqa: E731
+    with pytest.raises(_Cancelled):
+        recorder._convert_audio(source, tmp_path / "c.wav", 2.0, lesson(), on_progress, cancel)

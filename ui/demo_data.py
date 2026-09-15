@@ -1,7 +1,7 @@
 """PICKICLASS_UI_DEMO=1 로 실행할 때 코어 없이 화면을 확인하기 위한 가짜 데이터/구현.
 
-실제 pickiclass.client / pickiclass.ffmpeg_tool / pickiclass.recorder 와 동일한 인터페이스를
-흉내 내되, 네트워크나 ffmpeg 없이 짧은 지연/스레드만으로 동작한다.
+실제 pickiclass.client / pickiclass.recorder 와 동일한 인터페이스를
+흉내 내되, 네트워크나 영상 처리 없이 짧은 지연/스레드만으로 동작한다.
 """
 
 from __future__ import annotations
@@ -87,28 +87,12 @@ class DemoClient:
         return make_demo_lessons(course)
 
 
-def demo_find_ffmpeg() -> tuple[Path, Path] | None:
-    """데모에서는 ffmpeg가 없는 상태로 시작해 설치 화면도 확인할 수 있게 한다."""
-    return None
-
-
-def demo_install_ffmpeg(on_progress: Callable[[float], None] | None = None) -> tuple[Path, Path]:
-    for i in range(1, 11):
-        time.sleep(0.15)
-        if on_progress:
-            on_progress(i / 10)
-    fake_dir = Path.home() / ".pickiclass-demo"
-    return fake_dir / "ffmpeg", fake_dir / "ffprobe"
-
-
 class DemoRecorder:
     """Recorder 를 흉내 내는 가짜 레코더. 진행 화면/실패 재시도 UI 확인용."""
 
     def __init__(
         self,
         client: DemoClient,
-        ffmpeg: Path,
-        ffprobe: Path,
         output_dir: Path,
         speed: float = 1.5,
         keep_original: bool = False,
@@ -116,8 +100,6 @@ class DemoRecorder:
         capture_device_index: int | None = None,
     ) -> None:
         self.client = client
-        self.ffmpeg = ffmpeg
-        self.ffprobe = ffprobe
         self.output_dir = output_dir
         self.speed = speed
         self.keep_original = keep_original
