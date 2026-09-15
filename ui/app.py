@@ -42,7 +42,7 @@ class App:
 
         self.speed: float = 1.5
         self.output_dir: Path = DEFAULT_OUTPUT_DIR
-        self.keep_original: bool = False
+        self.keep_original: bool = True
         self.workers: int = 2
         self.capture_device_index: int | None = None
 

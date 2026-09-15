@@ -61,6 +61,28 @@ def test_kollus_block_reason_reads_recent_cp949_log(tmp_path):
     log.write_bytes(line(now - timedelta(hours=1), "스팀 클라이언트(steam.exe)").encode("cp949"))
     assert kollus_block_reason(log) is None
     assert kollus_block_reason(tmp_path / "missing.log") is None
+    # Kollus Agent 3.1.2.6은 로그를 UTF-16으로 쓰고 한글 설명이 깨진다.
+    garbled = "ũ�� ���� pin(remote_assistance_host.exe, remote_assistance_host.exe)"
+    log.write_bytes(b"\xff\xfe" + line(now, garbled).encode("utf-16-le"))
+    assert kollus_block_reason(log) == "remote_assistance_host.exe"
+
+
+def test_running_blockers_flags_known_programs_and_chrome_only_with_crd(monkeypatch):
+    import subprocess
+    import sys
+
+    import pickiclass.playback as playback
+
+    listing = '"chrome.exe","1"\n"Steam.exe","2"\n"remote_assistance_host.exe","3"\n"code.exe","4"\n'
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(subprocess, "CREATE_NO_WINDOW", 0, raising=False)
+    monkeypatch.setattr(
+        subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout=listing)
+    )
+    monkeypatch.setattr(playback, "installed_capture_programs", lambda: [])
+    assert playback.running_blockers() == ["remote_assistance_host.exe", "steam.exe"]
+    monkeypatch.setattr(playback, "installed_capture_programs", lambda: ["Chrome Remote Desktop Host"])
+    assert playback.running_blockers() == ["remote_assistance_host.exe", "steam.exe", "chrome.exe"]
 
 
 def test_parse_event_ignores_non_json_and_secrets_shape():

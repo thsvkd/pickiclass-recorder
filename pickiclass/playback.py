@@ -24,9 +24,9 @@ CAPTURE_BLOCK_MESSAGE = (
 _CAPTURE_NAME_MARKERS = ("chrome remote desktop", "chromoting")
 _START_TIMEOUT_SEC = 90
 _EARLY_INTERRUPT_SEC = 30
-# Kollus 에이전트는 차단할 때 감지한 프로그램 이름을 사용자 TEMP의 로그에 cp949로 남긴다.
+# Kollus 에이전트는 차단할 때 감지한 프로그램을 사용자 TEMP의 로그에 남긴다.
 _KOLLUS_BLOCK_RE = re.compile(
-    rb"^(\d{4}-\d\d-\d\d, \d\d:\d\d:\d\d)[^\n]*setCaptueCode code = -?1002, msg = ([^\r\n]+)",
+    r"^\W*(\d{4}-\d\d-\d\d, \d\d:\d\d:\d\d)[^\n]*setCaptueCode code = -?1002, msg = ([^\r\n]*)",
     re.M,
 )
 
@@ -36,14 +36,20 @@ def kollus_block_reason(log_path: Path | None = None, max_age_sec: float = 120) 
     if log_path is None:
         log_path = Path(os.environ.get("TEMP", "")) / "KollusAgent.log"
     try:
-        tail = log_path.read_bytes()[-64_000:]
+        data = log_path.read_bytes()
     except OSError:
         return None
-    for stamp, reason in reversed(_KOLLUS_BLOCK_RE.findall(tail)):
-        logged = datetime.strptime(stamp.decode(), "%Y-%m-%d, %H:%M:%S")
-        if abs((datetime.now() - logged).total_seconds()) <= max_age_sec:
-            return reason.decode("cp949", "replace").strip()
-        return None
+    # 에이전트 버전에 따라 로그가 cp949이거나 BOM 있는 UTF-16이다(3.1.2.6은 UTF-16).
+    text = data.decode("utf-16", "replace") if data[:2] == b"\xff\xfe" else data.decode(
+        "cp949", "replace"
+    )
+    for stamp, msg in reversed(_KOLLUS_BLOCK_RE.findall(text)):
+        logged = datetime.strptime(stamp, "%Y-%m-%d, %H:%M:%S")
+        if abs((datetime.now() - logged).total_seconds()) > max_age_sec:
+            return None
+        # 한글 설명은 버전에 따라 깨진 채 기록되므로 괄호 안 실행 파일 이름을 우선 쓴다.
+        program = re.search(r"\(([^,)]+)", msg)
+        return program.group(1).strip() if program else (msg.strip() or None)
     return None
 
 
@@ -85,6 +91,35 @@ def installed_capture_programs() -> list[str]:
             except OSError:
                 continue
     return capture_programs_from_names(names)
+
+
+# Kollus 에이전트가 실제로 차단한 프로세스(로그 실측)와 캡처 차단 모듈 문자열에 있던 이름.
+# ponytail: 고정 목록이다. Kollus가 새 프로그램을 막으면 실패 메시지의 감지 이름을 보고 추가한다.
+_BLOCKING_PROCESSES = frozenset({
+    "remote_assistance_host.exe", "remoting_desktop.exe", "steam.exe", "snippingtool.exe",
+    "obs.exe", "obs32.exe", "obs64.exe", "winvnc.exe", "realvnc.exe", "vncserver.exe",
+    "anydesk.exe", "teamviewer_desktop.exe",
+})
+
+
+def running_blockers() -> list[str]:
+    """Kollus가 재생을 중단시키는 실행 중 프로그램. CRD Host가 설치돼 있으면 Chrome도 포함한다."""
+    if sys.platform != "win32":
+        return []
+    import subprocess
+
+    try:
+        listing = subprocess.run(
+            ["tasklist", "/FO", "CSV", "/NH"], capture_output=True, text=True, timeout=15,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    running = {row.split(",")[0].strip('"').lower() for row in listing.splitlines() if row}
+    found = sorted(running & _BLOCKING_PROCESSES)
+    if "chrome.exe" in running and installed_capture_programs():
+        found.append("chrome.exe")
+    return found
 
 
 def parse_event(line: str) -> dict | None:

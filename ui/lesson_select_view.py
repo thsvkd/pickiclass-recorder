@@ -302,6 +302,21 @@ class LessonSelectScreen:
         if not self.app.demo and self.app.capture_device_index is None:
             self.app.show_snack_bar("암호화 강의 저장을 위해 출력 장치를 선택하세요.")
             return
+        if not self.app.demo:
+            from pickiclass.playback import running_blockers
+
+            blockers = running_blockers()
+            if blockers:
+                hint = (
+                    " remote_assistance_host.exe는 Chrome 원격 데스크톱 구성 요소라 Chrome을 닫아도 "
+                    "남아 있으니 작업 관리자에서 종료하세요."
+                    if "remote_assistance_host.exe" in blockers else ""
+                )
+                self.app.show_snack_bar(
+                    f"Kollus가 재생을 중단시키는 프로그램이 실행 중입니다: {', '.join(blockers)}. "
+                    f"종료한 뒤 다시 시작하세요.{hint}"
+                )
+                return
         self.app.begin_download(self.course, chosen)
 
     # ------------------------------------------------------------------
